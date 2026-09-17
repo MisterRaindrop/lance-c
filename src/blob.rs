@@ -204,8 +204,10 @@ unsafe fn blob_file_read_inner(
 
     let bytes = block_on(handle.inner.read())?;
     if !bytes.is_empty() {
-        let dst = unsafe { std::slice::from_raw_parts_mut(dst, dst_len) };
-        dst[..bytes.len()].copy_from_slice(&bytes);
+        // The read stops at the blob end, so `bytes` fits in the `dst_len`
+        // checked above; size the slice to what is actually written.
+        let dst = unsafe { std::slice::from_raw_parts_mut(dst, bytes.len()) };
+        dst.copy_from_slice(&bytes);
     }
     Ok(0)
 }
@@ -245,8 +247,10 @@ unsafe fn blob_file_read_up_to_inner(
 
     let bytes = block_on(handle.inner.read_up_to(len))?;
     if !bytes.is_empty() {
-        let dst = unsafe { std::slice::from_raw_parts_mut(dst, len) };
-        dst[..bytes.len()].copy_from_slice(&bytes);
+        // Upstream caps the read at `len`; size the slice to what is actually
+        // written.
+        let dst = unsafe { std::slice::from_raw_parts_mut(dst, bytes.len()) };
+        dst.copy_from_slice(&bytes);
     }
     unsafe { ptr::write_unaligned(bytes_read, bytes.len()) };
     Ok(0)

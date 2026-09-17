@@ -298,6 +298,11 @@ class Dataset {
 
     /// Move raw handles into RAII owners. `blobs` must be reserved up front so
     /// nothing can throw while handles are still unowned.
+    ///
+    /// Leak-freedom also rests on the C side: `lance_dataset_take_blobs*` fill
+    /// `out` all-or-nothing and leave it untouched on error. A partial fill
+    /// before an error would leak, because `check_error()` throws before this
+    /// runs and `raw` owns nothing.
     static void adopt_blobs(const std::vector<LanceBlobFile*>& raw,
                             std::vector<std::optional<BlobFile>>& blobs) {
         for (auto* blob : raw) {
