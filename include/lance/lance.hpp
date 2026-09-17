@@ -1270,6 +1270,7 @@ public:
     }
 
     /// Configure whether scalar indices may be used to optimize filters.
+    /// False also disables explicit scalar segment search, retaining its fragment domain.
     Scanner& use_scalar_index(bool enable = true) {
         if (lance_scanner_set_use_scalar_index(handle_.get(), enable) != 0)
             check_error();
@@ -1290,6 +1291,14 @@ public:
         return *this;
     }
 
+    /// Choose how blob columns are materialized (default: descriptors for blob
+    /// columns, bytes for every other binary column).
+    Scanner& blob_handling(LanceBlobHandling handling) {
+        if (lance_scanner_set_blob_handling(handle_.get(), handling) != 0)
+            check_error();
+        return *this;
+    }
+
     /// Enable/disable row ID in output.
     Scanner& with_row_id(bool enable = true) {
         if (lance_scanner_with_row_id(handle_.get(), enable) != 0)
@@ -1305,8 +1314,26 @@ public:
     }
 
     /// Configure whether deleted rows still present in storage are returned.
+    /// Requires with_row_id(true); use_scalar_index(false) is needed for filtered scans.
+    /// Incompatible with scalar_index_segment. See lance.h.
     Scanner& include_deleted_rows(bool include_deleted_rows = true) {
         if (lance_scanner_set_include_deleted_rows(handle_.get(), include_deleted_rows) != 0)
+            check_error();
+        return *this;
+    }
+
+    /// Generate exact candidates from one BTree/Bitmap/LabelList segment.
+    /// fragment_ids is required and defines the complete read/fallback domain. See lance.h.
+    /// Requires live rows only: include_deleted_rows(true) is rejected at stream creation.
+    /// use_scalar_index(false) selects the scoped fallback without searching the segment.
+    Scanner& scalar_index_segment(const std::array<uint8_t, 16>& segment_uuid) {
+        if (lance_scanner_set_scalar_index_segment(handle_.get(), segment_uuid.data()) != 0)
+            check_error();
+        return *this;
+    }
+
+    Scanner& clear_scalar_index_segment() {
+        if (lance_scanner_set_scalar_index_segment(handle_.get(), nullptr) != 0)
             check_error();
         return *this;
     }
@@ -1413,6 +1440,16 @@ public:
                      LanceDataType dtype, uint32_t k) {
         if (lance_scanner_nearest(handle_.get(), column.c_str(),
                                    q, dim, dtype, k) != 0)
+            check_error();
+        return *this;
+    }
+
+    /// One multi-vector query, copied from dimension * num_vectors row-major elements.
+    Scanner& nearest_multivector(const std::string& column, const void* query_data,
+                                size_t dimension, size_t num_vectors,
+                                LanceDataType element_type, uint32_t k) {
+        if (lance_scanner_nearest_multivector(handle_.get(), column.c_str(), query_data,
+                                            dimension, num_vectors, element_type, k) != 0)
             check_error();
         return *this;
     }

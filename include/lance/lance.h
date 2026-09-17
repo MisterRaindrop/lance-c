@@ -1015,7 +1015,9 @@ int32_t lance_scanner_set_scan_in_order(LanceScanner* scanner, bool scan_in_orde
  * Configure whether scalar indices may be used to optimize filters.
  *
  * Scalar indices are enabled by default. Disable this to force filter
- * evaluation without scalar indices. This setting is independent of
+ * evaluation without scalar indices, including an explicitly selected scalar
+ * segment (which falls back to a scan of its explicit fragment_ids).
+ * This setting is independent of
  * `lance_scanner_set_use_index`, which controls vector ANN index usage.
  * Must be set before scanning starts.
  */
@@ -1051,13 +1053,49 @@ int32_t lance_scanner_with_row_address(LanceScanner* scanner, bool enable);
 
 /**
  * Configure whether deleted rows still present in storage are returned.
- * Deleted rows have a NULL `_rowid`; callers should also enable row IDs.
+ * Requires with_row_id=true; deleted rows have a NULL `_rowid`.
+ * For filtered scans, also set use_scalar_index=false: indices built after a
+ * deletion may omit tombstoned rows. Incompatible with scalar_index_segment,
+ * even when scalar indices are disabled.
+ * Fragments removed from the current snapshot are not scanned.
  * Must be set before scanning starts.
  */
 int32_t lance_scanner_set_include_deleted_rows(
     LanceScanner* scanner,
     bool include_deleted_rows
 );
+
+/** How blob columns are materialized by a scan. Validated as an integer. */
+typedef enum {
+    /**
+     * Default: blob columns are returned as descriptor structs and every
+     * other binary column is returned as bytes. The descriptor layout
+     * depends on the storage format of the column: Blob v2 columns yield
+     * (kind, position, size, blob_id, blob_uri), while legacy blob columns
+     * (large_binary tagged `lance-encoding: blob`) yield (position, size).
+     */
+    LANCE_BLOB_HANDLING_BLOBS_DESCRIPTIONS = 0,
+    /** Every blob column is materialized as bytes (LargeBinary). */
+    LANCE_BLOB_HANDLING_ALL_BINARY = 1,
+    /**
+     * Requests descriptors for every binary column. On lance v11.0.0 only
+     * columns carrying blob metadata are affected; other binary columns keep
+     * their bytes, so this behaves like
+     * LANCE_BLOB_HANDLING_BLOBS_DESCRIPTIONS.
+     */
+    LANCE_BLOB_HANDLING_ALL_DESCRIPTIONS = 2,
+} LanceBlobHandling;
+
+/**
+ * Choose how blob columns are materialized by this scan. Default:
+ * LANCE_BLOB_HANDLING_BLOBS_DESCRIPTIONS. ALL_BINARY pulls the full payload
+ * into the batches, so keep descriptors for large values. Columns without
+ * blob metadata keep their bytes under every mode.
+ *
+ * Must be set before scanning starts; values outside the enum are rejected.
+ * @return 0 on success, -1 on error
+ */
+int32_t lance_scanner_set_blob_handling(LanceScanner* scanner, LanceBlobHandling handling);
 
 /**
  * Restrict scan to the given fragment IDs. Must be called before iteration.
@@ -1779,6 +1817,21 @@ int32_t lance_scanner_nearest(
 );
 
 /**
+ * Set one multi-vector query on a List<FixedSizeList<float16|float32|float64>> column.
+ * Inner vectors must be non-nullable and contain no null elements; the outer list may be nullable.
+ * query_data contains dimension * num_vectors aligned elements in row-major order.
+ * Both sizes and k must be positive. At most 128 query subvectors are accepted;
+ * num_vectors * k and refine_factor * k must each be at most 100000.
+ * Values are copied before returning. The default metric is L2 on every fragment.
+ * Scores sum each query vector's minimum distance; refinement defaults to 1.
+ * Returns 0 on success, -1 on error. Stored invalid elements fail during execution.
+ */
+int32_t lance_scanner_nearest_multivector(
+    LanceScanner* scanner, const char* column, const void* query_data,
+    size_t dimension, size_t num_vectors, LanceDataType element_type, uint32_t k
+);
+
+/**
  * Set both the minimum and maximum vector-index partition-search bounds.
  *
  * This replaces both bounds configured by earlier calls to any nprobes
@@ -1857,6 +1910,36 @@ int32_t lance_scanner_set_index_segments(
     const uint8_t* segment_uuids,
     size_t len
 );
+
+/**
+ * Accelerate an ordinary scalar-filtered scan with one physical index segment.
+ * segment_uuid points to 16 UUID bytes in RFC 4122 order; NULL clears the setting.
+ * Must be configured before scanning. Requires explicit nonempty fragment_ids,
+ * which define BOTH the read and fallback domain, independently of the segment.
+ * Missing snapshot UUIDs / fragment IDs are errors. Extra segment coverage is
+ * excluded by fragment_ids; incomplete coverage falls back to a full filtered
+ * scan of those fragment_ids. Callers distributing work must assign disjoint
+ * fragment domains and separately include any unindexed data they wish to read.
+ * The segment metadata must identify one key field present in the schema.
+ *
+ * BTree/Bitmap/LabelList searches use a necessary AND-conjunct of the
+ * full scanner filter on the selected logical index and require an Exact result.
+ * use_scalar_index=false skips segment search and uses the scoped fallback;
+ * snapshot UUID and fragment validation still applies.
+ * AtMost/AtLeast results fall back to a full filtered scan of fragment_ids.
+ * All predicates are reapplied during candidate reads; other scalar indices
+ * are disabled. Legacy storage, OR/NOT-only filters,
+ * overlays, fragment reuse, unsupported index types / result domains
+ * and missing coverage use the same domain without an index. No filter also
+ * falls back. LIMIT/OFFSET apply after the complete scanner filter, never to the
+ * unfiltered candidate set. Vector/FTS queries and include_deleted_rows=true
+ * are rejected even when use_scalar_index=false; segment mode is live-row-only.
+ *
+ * UUID bytes are copied. Metadata and final option compatibility are validated
+ * when creating the stream. Index corruption or I/O failures remain errors.
+ */
+int32_t lance_scanner_set_scalar_index_segment(
+    LanceScanner* scanner, const uint8_t* segment_uuid);
 
 /* ─── Full-text search (Phase 2) ─── */
 
